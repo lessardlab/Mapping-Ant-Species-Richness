@@ -1,0 +1,525 @@
+---
+title: "Mapping Species Richness: Integrating Occurrence Data, Climatic Variables, and Phylogenetic Insights in a Global Grid Analysis - A minimal example"
+date: today
+author:
+  - name: Gabriel Munoz-Acevedo
+    id: jc
+    orcid: 
+    email: gabrielmunoz1891@gmail.com
+    affiliation: 
+      - name: Concordia University
+        city: Montreal
+        state: Canada
+        url: www.concordia.ca
+abstract: > 
+  In this notebook, there is a minimal tutorial to a spatial analysis pipeline that maps species occurrence points to WorldClim variables and overlays them on a global grid to quantify species richness per cell. There is also examples about using GLM, GLMM, and phylogenetic regression, to examine how climate variation to estimate an ordinal measure of ant polymorphism.
+keywords:
+  - Ant polymorphism
+  - Phylogenetic regression
+  - Global biodiversity 
+  - Ecological complexity
+  - Quantitative ecology
+license: "CC BY"
+copyright: 
+  holder: Gabriel Munoz-Acevedo
+  year: 2025
+citation: 
+  container-title: "Community Assembly and Biogeography Lab: R Tutorial series"
+  volume: 1
+  issue: 1
+  doi: xxxxx/xxxx
+funding: "The author received no specific funding for this work."
+toc: true
+number-sections: true
+execute:
+  warning: false
+  message: false
+---
+
+# Getting started
+
+Before you start:
+
+-   Make sure you have the latest version of R installed.
+
+-   Open R in any IDE of your choosing (Rstudio, VScode, Jupyter, etc... )
+
+-   Create an empty script (.R) or notebook (.Rmd, .Qmd)
+
+-   Copy the code from this notebook and execute it in your local drive
+
+-   Alternatively, clone the GitHub repository or download the notebook source code and open it in your drive
+
+    -   make sure to have Quarto installed if you go this route. For Rstudio users, Quarto comes preinstalled, for VScode and others, you need to download the Quarto extension.
+
+# Dependencies
+
+To replicate this tutorial, make sure you have the following packages. To install a package, use `install.packages('package_name')` (Note you need to do it only once)
+
+```{r}
+# install.packages('duckplyr')
+# install.packages('geodata')
+
+library(tidyverse) # for data manipulation
+library(duckplyr) # for fast data processing 
+library(phytools) # for phylogenetic regression
+library(lme4) # for linear models 
+library(rnaturalearth)
+library(sf)
+library(raster)
+```
+
+# Sourcing data
+
+For this tutorial we will use the ant polymorphism database publised as part of the article: `LaRichelliere et al., 2023. Warm regions of the world are hotspots of superorganism complexity`
+
+The dataset is open and public. You can download your own copy of the data by cloning the paper GitHub repository: https://github.com/lessardlab/GlobalPolyMorp
+
+```{r}
+# Source data on global ant polymorphism.
+
+my_ant_data <- duckplyr_df_from_csv("Lat-Long_Data_GABI.csv")
+
+summary(my_ant_data)
+
+head(my_ant_data)
+```
+
+Let's start with tidying the dataset. For instance, we can separate the Genus, species, and species name
+
+```{r}
+
+my_ant_data <- 
+  my_ant_data |> 
+  mutate(Genus = str_extract(valid_species_name, "^([^.]+)"),
+         species = str_extract(valid_species_name, "([^.]+)$"), 
+         species_name_no_dot = str_replace(valid_species_name, "\\.", " "))
+
+my_ant_data |>
+  duckplyr::select(Genus, species, species_name_no_dot ) |> 
+  DT::datatable()
+
+```
+
+For this tutorial, we will focus on the genus `Cataglyphis`. Let's filter the dataset
+
+```{r}
+
+my_catagliphis_data <- my_ant_data |>
+  filter(Genus == 'Cataglyphis')
+
+
+dim(my_catagliphis_data) # 1765 observations 
+
+```
+
+Let us now create unique point identifiers
+
+```{r}
+my_catagliphis_data <- 
+my_catagliphis_data |> 
+  mutate(unique_id = paste(dec_long, dec_lat))
+
+```
+
+Let us now do some basic crosstabulations to get an impression of our data subset
+
+> How many unique species?
+
+```{r}
+my_catagliphis_data |>
+  distinct(valid_species_name) |> 
+  count()
+
+## 68 species
+```
+
+> Which species has the most records?
+
+```{r}
+
+my_species_record_count <- 
+my_catagliphis_data |> 
+  count(valid_species_name) |>
+  arrange(desc(n)) 
+
+my_species_record_count |>
+  DT::datatable()
+# the most recorded species seems to be Cataglyphis.albicans
+```
+
+Let us visualize the sampling effort
+
+```{r}
+
+my_species_record_count |> pull(n) |> hist()
+
+
+```
+
+The figure shows a highly skewed dataset, with a very dominant species.
+
+> How many species per country?
+
+```{r}
+
+my_catagliphis_data |> 
+  count(valid_species_name, country) |>
+  arrange(desc(n)) |>
+  DT::datatable()
+
+```
+
+Seems that there is relatively a lot of data for `Cataglyphis.velox` in Spain.
+
+> What is the elevation range of the genus?
+
+```{r}
+
+my_catagliphis_data |> 
+  count(valid_species_name, elevation) |>
+  arrange(desc(n))|>
+  DT::datatable()
+```
+
+It seems there is quite a lot or NA elevation records for this species, lets examine the missing data
+
+```{r}
+
+my_catagliphis_data |> 
+  count(is.na(elevation))|>
+  DT::datatable()
+
+
+```
+
+There are 1121 records with no elevation data. \> 50%. What is the distribution of the available elevational records?
+
+```{r}
+my_catagliphis_data |> 
+  filter(!is.na(elevation)) |> 
+  count(valid_species_name, elevation) |>
+  ggplot() +
+  geom_col(aes(elevation, n)) + 
+  theme_minimal()
+
+```
+
+From the observed records, seems that this genus is primarily concentrated in lowlands.
+
+# Project occurrence points on a world map
+
+```{r}
+# Retrieve world map data as an sf (simple features) object
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Plot the world map and overlay the latitude and longitude points
+ggplot(data = world) +
+  geom_sf(fill = "antiquewhite") +  # Plot the world map
+  geom_point(data = my_catagliphis_data, aes(x = dec_long, y = dec_lat), color = "red", size = 1) +  # Plot points
+   coord_sf(expand = FALSE) +
+  theme_minimal() +
+  labs(title = "Global distribution of Cataglyphis ants",
+       x = "Longitude", y = "Latitude")
+
+
+
+```
+
+Looks like its an old world genera! Let us restric the view.
+
+```{r}
+
+# Plot the world map and overlay the latitude and longitude points
+ggplot(data = world) +
+  geom_sf(fill = "antiquewhite") +  # Plot the world map
+  geom_point(data = my_catagliphis_data, aes(x = dec_long, y = dec_lat), color = "red", size = 1) +  # Plot points
+   coord_sf(expand = FALSE) +
+  theme_minimal() +
+  labs(title = "Old-world distribution of Cataglyphis ants",
+       x = "Longitude", y = "Latitude") + 
+ coord_sf(xlim = c(-30, 180), ylim = c(-35, 70), expand = FALSE) 
+```
+
+Italy seems underrepresented (maybe the genera do not like mountains / or romans)
+
+# Project a grid system to quantify species in a grid cell
+
+Define a Lambert Azimuthal Equal Area projection centered over Europe.
+
+```{r}
+
+locations_sf <- st_as_sf(my_catagliphis_data, coords = c("dec_long", "dec_lat"), crs = 4326)
+
+
+# (You can adjust +lat_0 and +lon_0 to suit your region of interest.)
+equal_area_crs <- st_crs("+proj=laea +lat_0=52 +lon_0=10 +datum=WGS84 +units=m +no_defs")
+
+# Transform the world map and locations to the equal-area projection
+world_ea    <- st_transform(world, crs = equal_area_crs)
+locations_ea <- st_transform(locations_sf, crs = equal_area_crs)
+
+```
+
+Generate an Equal-Area Grid, adjusting the cellsize to your needs
+
+Note this is a computationally expensive operation, specially if you choose very high resolution cells.
+
+To keep things simple, we will create a relatively large grid for this tutorial. Investigate which is the adequate cellsize for your projects. Note that cellsize will determine the spatial bias.
+
+```{r}
+# 500000 m each side 
+grid_squared <- st_make_grid(world_ea, cellsize = c(500000, 500000), square = TRUE)
+
+# alternatively, you can generate hexagons. 
+grid_hex <- st_make_grid(world_ea, cellsize = c(500000, 500000), square = FALSE)
+
+# make the grids a sf objects
+grid_squared <- st_sf(geometry = grid_squared)
+grid_hex <- st_sf(geometry = grid_hex)
+
+```
+
+Let us now visualize the grid
+
+```{r}
+ggplot() +
+  geom_sf(data = grid_squared, fill = NA, color = "blue", size = 0.5) +  # Plot grid
+  geom_sf(data = world_ea, fill = "antiquewhite", color = "gray60") +  # Plot world map
+  geom_sf(data = locations_ea$geometry, color = "red", size = 1) +  # Plot ant points
+  theme_minimal() +
+  labs(
+    title = "Old World Map with an Equal-Area Grid (EPSG:3035)",
+    x = "Easting (m)",
+    y = "Northing (m)"
+  )
+```
+
+or the hexagonal grid
+
+```{r}
+ggplot() +
+  geom_sf(data = grid_hex, fill = NA, color = "blue", size = 0.5) +  # Plot grid
+  geom_sf(data = world_ea, fill = "antiquewhite", color = "gray60") +  # Plot world map
+  geom_sf(data = locations_ea$geometry, color = "red", size = 1) +  # Plot ant points
+  theme_minimal() +
+  labs(
+    title = "Old World Map with an Equal-Area Grid (EPSG:3035)",
+    x = "Easting (m)",
+    y = "Northing (m)"
+  )
+```
+
+::: callout-tip
+If you are working with a highly resoluted grid, generate it one time, and hard save the grid object to be loaded in below the pipeline. You will avoid re-running the computation to generate the grid each time if done so. You can save a grid as an `RDS` object with `saveRDS('object_name', 'path')`
+:::
+
+# Calculate species richness per grid cell by overlapping polygons
+
+Let us now extract the subset of the grid that matches the occurence points.
+
+```{r}
+grid_intersections <- st_intersects(grid_hex, locations_ea)
+
+# Create a logical vector: TRUE if the grid cell has one or more occurrence points.
+has_points <- sapply(grid_intersections, function(x) length(x) > 0)
+
+# Subset the grid cells that have occurrence points.
+grid_with_occurrence <- grid_hex[has_points, ]
+
+# Inspect the result
+plot(grid_hex)
+plot(grid_with_occurrence, col = 'red', add = TRUE)
+```
+
+Let us now joint the datasets to count the species richness per grid
+
+```{r}
+grid_joined <- st_join(grid_with_occurrence, locations_ea, join = st_intersects)
+
+head(grid_joined)
+```
+
+Since now geometry refers to the grid, we can crosstabulate
+
+```{r}
+grid_joined |>
+count(valid_species_name, geometry) |>
+arrange(desc(n))
+
+```
+
+Seems the species `Cataglyphis.velox` has the greatest sampling effort
+
+```{r}
+
+Sp_rich <- 
+grid_joined |>
+  group_by(geometry) |>
+  summarise(spRich = n_distinct(valid_species_name, na.rm = TRUE)) |> 
+arrange(desc(spRich))
+
+Sp_rich |> head()
+```
+
+It seems the highest richness of 'Cataglyphis' ants for a given grid of this size is 17 species.
+
+Let us know visualize the distribution of richness across all grids
+
+```{r}
+Sp_rich |> 
+ggplot() + 
+geom_histogram(aes(spRich))
+```
+
+It seems the majority of grids, have only few species.
+
+Let us visualize the trend
+
+```{r}
+world_ea$geometry |> plot()
+Sp_rich |> plot(add = TRUE)
+```
+
+Lighter colors indicate greater richness. Of course there are way prettier ways to plot this map for publication. Try and create a publication ready plot!
+
+# Matching gridcells to climatic variables
+
+Now we have the gridcells that are of interest to us, we can intersect them with climatic data (or any other environmental data)
+
+```{r}
+# Download WorldClim data using the geodata package
+wc_geodata <- geodata::worldclim_global(var = "bio", res = 10, path = getwd())
+
+## I download the data to my working directory. Make sure you know where you are working or specify a desired path.
+
+
+```
+
+Note that we need to to this only once, the result of this will be a new directory `climate` in your working directory or in the specified path
+
+We can inspect the resulting variables 
+
+```{r}
+wc_geodata |> names()
+```
+
+
+```{r}
+par(mfrow = c(1,2))
+plot(wc_geodata[[1]]) # bio01 (mean annual temperature)
+plot(wc_geodata[[12]]) # bio12  (total annual precipitation)
+```
+
+Let us now get the gridded climatic variables
+
+```{r}
+# Convert the sf grid to a terra SpatVector for extraction.
+grid_vect <- terra::vect(Sp_rich$geometry)
+
+### 4. Extract Climate Averages per Grid Cell
+
+# Use terra::extract() with a function (fun) that computes the mean value in each grid cell.
+# This will compute the mean for each bioclimatic layer across the pixels that fall in each grid cell.
+# na.rm = TRUE ensures that missing values are ignored in the averaging.
+# note that you can summarize with other functions depending on what it is what you are interested (sd, median, etc). 
+climate_avgs <- terra::extract(wc_geodata, grid_vect, fun = mean, na.rm = TRUE)
+
+# The result is a data.frame with an ID column linking to the grid cell and one column per climate variable.
+head(climate_avgs)
+```
+We can bind back the climatic data to keep it all tidy 
+
+
+```{r}
+grid_with_climate <- cbind(Sp_rich, climate_avgs[,-1])
+
+grid_with_climate |> head()
+```
+
+
+# Run basic GLM and GLMM relating variation in richness to climate
+
+The data is ready now to fit a model, lets fit a simple linear model. 
+
+We will evaluate how species richness is explained with the variation in temperature and precipitation 
+
+$$ S \sim MAT + TAP + \epsilon $$
+
+
+```{r}
+my_simple_lm <- lm(spRich ~ wc2.1_10m_bio_1  + wc2.1_10m_bio_12, data = grid_with_climate)
+```
+
+
+Let's visualize the results of the fitted model
+
+```{r}
+my_simple_lm |> summary()
+```
+It looks like temperature can explain the patterns in richness, but precipitation not quite. Also the R squared is low, meaning the model has low predictive power. You can investigate a better fit by transforming variables (e.g. square-root transformation). 
+
+We can also use the `glm()` function that fits a generalized linear model. In here, we have more control of the model family and other hyperparameters. 
+
+```{r}
+# Fit a generalized linear model with Gaussian family,
+# which is analogous to a linear model.
+my_simple_glm <- glm(
+  spRich ~ wc2.1_10m_bio_1 + wc2.1_10m_bio_12,
+  data = grid_with_climate,
+  family = gaussian(),
+  control = glm.control(epsilon = 1e-8, maxit = 50, trace = FALSE)
+)
+
+summary(my_simple_glm)
+```
+
+However, the results are comparable. 
+
+The `marginaleffects` package makes it easy to plot results
+
+
+```{r}
+library(marginaleffects)
+
+
+marginaleffects::plot_predictions(my_simple_glm, condition = 'wc2.1_10m_bio_1')
+
+marginaleffects::plot_predictions(my_simple_glm, condition = 'wc2.1_10m_bio_12')
+
+
+```
+
+The resulting objects are ggplot objects, so they can be styled
+
+```{r}
+
+partial_plot_temperature <- marginaleffects::plot_predictions(my_simple_glm, condition = 'wc2.1_10m_bio_1')
+
+
+partial_plot_temperature +
+theme_minimal() + 
+xlab('Mean annual temperature') + 
+ylab('Species richness of Cataglyphis')
+```
+
+
+
+# Run a phylogenetic regression using occurence data an an estimate of polymorphism
+
+
+TBD
+
+
+
+
+
+
+
+
+
+
+
+
+
+
