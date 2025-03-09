@@ -44,13 +44,34 @@ Before you start:
 
 -   Open R in any IDE of your choosing (Rstudio, VScode, Jupyter, etc... )
 
--   Create an empty script (.R) or notebook (.Rmd, .Qmd)
 
--   Copy the code from this notebook and execute it in your local drive
+## Clone the repository
 
--   Alternatively, clone the GitHub repository or download the notebook source code and open it in your drive
+-   Clone the GitHub repository 
 
-    -   make sure to have Quarto installed if you go this route. For Rstudio users, Quarto comes preinstalled, for VScode and others, you need to download the Quarto extension.
+::: callout-tip
+## How to clone a repository from gitHub
+
+1. Go to the GitHub repository page: https://github.com/lessardlab/Mapping-Ant-Species-Richness
+
+2. Copy the https link of the repository: https://github.com/lessardlab/Mapping-Ant-Species-Richness.git
+
+2. Open the terminal in your computer
+
+3. Set the directory where you want to clone the repository
+
+4. Type `git clone https://github.com/lessardlab/Mapping-Ant-Species-Richness.git`
+
+5. Hit enter
+
+6. Done! You have cloned the repository in your computer. 
+
+:::
+
+::: callout-important
+Make sure to have Quarto installed if you go this route. For Rstudio users, Quarto comes preinstalled, for VScode and others, you need to download the Quarto extension.
+:::
+
 
 # Dependencies
 
@@ -117,7 +138,7 @@ Let us now create unique point identifiers
 
 ```{r}
 my_catagliphis_data <- 
-my_catagliphis_data |> 
+  my_catagliphis_data |> 
   mutate(unique_id = paste(dec_long, dec_lat))
 
 ```
@@ -139,7 +160,7 @@ my_catagliphis_data |>
 ```{r}
 
 my_species_record_count <- 
-my_catagliphis_data |> 
+  my_catagliphis_data |> 
   count(valid_species_name) |>
   arrange(desc(n)) 
 
@@ -217,7 +238,7 @@ world <- ne_countries(scale = "medium", returnclass = "sf")
 ggplot(data = world) +
   geom_sf(fill = "antiquewhite") +  # Plot the world map
   geom_point(data = my_catagliphis_data, aes(x = dec_long, y = dec_lat), color = "red", size = 1) +  # Plot points
-   coord_sf(expand = FALSE) +
+  coord_sf(expand = FALSE) +
   theme_minimal() +
   labs(title = "Global distribution of Cataglyphis ants",
        x = "Longitude", y = "Latitude")
@@ -234,11 +255,11 @@ Looks like its an old world genera! Let us restric the view.
 ggplot(data = world) +
   geom_sf(fill = "antiquewhite") +  # Plot the world map
   geom_point(data = my_catagliphis_data, aes(x = dec_long, y = dec_lat), color = "red", size = 1) +  # Plot points
-   coord_sf(expand = FALSE) +
+  coord_sf(expand = FALSE) +
   theme_minimal() +
   labs(title = "Old-world distribution of Cataglyphis ants",
        x = "Longitude", y = "Latitude") + 
- coord_sf(xlim = c(-30, 180), ylim = c(-35, 70), expand = FALSE) 
+  coord_sf(xlim = c(-30, 180), ylim = c(-35, 70), expand = FALSE) 
 ```
 
 Italy seems underrepresented (maybe the genera do not like mountains / or romans)
@@ -355,8 +376,8 @@ Seems the species `Cataglyphis.velox` has the greatest sampling effort
 
 Sp_rich <- 
 grid_joined |>
-  group_by(geometry) |>
-  summarise(spRich = n_distinct(valid_species_name, na.rm = TRUE)) |> 
+group_by(geometry) |>
+summarise(spRich = n_distinct(valid_species_name, na.rm = TRUE)) |> 
 arrange(desc(spRich))
 
 Sp_rich |> head()
@@ -377,8 +398,16 @@ It seems the majority of grids, have only few species.
 Let us visualize the trend
 
 ```{r}
-world_ea$geometry |> plot()
-Sp_rich |> plot(add = TRUE)
+
+# Plot the world map geometry and overlay the species richness layer.
+ggplot() +
+# Plot the world map geometry
+geom_sf(data = world_ea, fill = "antiquewhite", color = "gray50") +
+# Overlay the species richness data (assumed to be an sf object)
+geom_sf(data = Sp_rich,aes(fill = spRich), size = 1, alpha = 0.5) +
+scale_fill_gradient(low = "darkblue", high = "firebrick", name = "Species Richness") +
+labs(title = "World Map with Species Richness Overlay") +
+theme_minimal()
 ```
 
 Lighter colors indicate greater richness. Of course there are way prettier ways to plot this map for publication. Try and create a publication ready plot!
@@ -465,10 +494,10 @@ We can also use the `glm()` function that fits a generalized linear model. In he
 # Fit a generalized linear model with Gaussian family,
 # which is analogous to a linear model.
 my_simple_glm <- glm(
-  spRich ~ wc2.1_10m_bio_1 + wc2.1_10m_bio_12,
-  data = grid_with_climate,
-  family = gaussian(),
-  control = glm.control(epsilon = 1e-8, maxit = 50, trace = FALSE)
+spRich ~ wc2.1_10m_bio_1 + wc2.1_10m_bio_12,
+data = grid_with_climate,
+family = gaussian(),
+control = glm.control(epsilon = 1e-8, maxit = 50, trace = FALSE)
 )
 
 summary(my_simple_glm)
@@ -505,15 +534,81 @@ ylab('Species richness of Cataglyphis')
 
 
 
+
 # Run a phylogenetic regression using occurence data an an estimate of polymorphism
 
 
-TBD
+## Denpendencies 
 
 
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("ggtree")
+
+```
 
 
+```{r}
+# Load dependencies
 
+library(ape)
+library(ggtree)
+```
+
+
+To run a phylogenetic regression, we need a phylogenetic tree. We will use the tree from: 
+
+> 
+| Nelsen, Matthew P.1; Ree, Richard H.1; Moreau, Corrie S.1
+  Ant-plant interactions evolved through increasing interdependence
+
+[link_to_data](https://www.pnas.org/doi/epdf/10.1073/pnas.1719794115)
+
+The tree is in the file `ML_TREE_treepl_185_outsdroppeds.ladderized.increasing.tre`
+
+```{r}
+
+
+# Load the phylogenetic tree
+ant_tree <- read.tree("ML_TREE_treepl_185_outsdroppeds.ladderized.increasing.tre")
+
+
+```
+
+Let us now plot the tree 
+
+
+```{r}
+# Create a circular phylogenetic tree plot
+phylo_ant_plot <- ggtree(ant_tree, layout="circular") +
+  theme_minimal() +  # Clean theme
+  theme(
+    text = element_text(size=14, family="Arial"), # Adjust font
+    plot.margin = margin(10, 10, 10, 10), # Add margin for clarity
+    legend.position = "right"
+  )
+phylo_ant_plot
+
+```
+
+
+Now we need to match the species in the tree to the species in the occurrence data
+
+
+```{r}
+
+
+## get the names of the Catagliphys species in the phylogenetic tree
+phylo_ant_plot$data$label %in% c(my_catagliphis_data$species_name_no_dot |> str_replace(" ", "_") |> unique()) |> table()
+
+## how many are catagliphys? 
+
+str_detect(phylo_ant_plot$data$label, 'Cataglyphis') |> table()
+```
+
+Not enough data for phylogenetic analysis. 
 
 
 
